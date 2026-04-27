@@ -4,7 +4,7 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from services.auth_service import auth_service
+from services.auth_service import InsufficientBalanceError, auth_service
 
 from api.support import (
     require_admin,
@@ -14,6 +14,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
+from services.log_service import LOG_TYPE_ACCOUNT, log_service
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
@@ -26,11 +27,17 @@ from services.sub2api_service import (
 
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
+    initial_balance: float | None = 0
 
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
+
+
+class UserKeyRechargeRequest(BaseModel):
+    amount: float
+    note: str | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -101,7 +108,9 @@ def create_router() -> APIRouter:
     @router.post("/api/auth/users")
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        item, raw_key = auth_service.create_key(role="user", name=body.name)
+        item, raw_key = auth_service.create_key(role="user", name=body.name, initial_balance=body.initial_balance or 0)
+        if float(body.initial_balance or 0) > 0:
+            log_service.add(LOG_TYPE_ACCOUNT, "创建用户并初始化余额", {"key_id": item.get("id"), "key_name": item.get("name"), "amount": round(float(body.initial_balance or 0), 3), "balance_after": item.get("balance")})
         return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
 
     @router.post("/api/auth/users/{key_id}")
@@ -124,6 +133,39 @@ def create_router() -> APIRouter:
         item = auth_service.update_key(key_id, updates, role="user")
         if item is None:
             raise HTTPException(status_code=404, detail={"error": "user key not found"})
+        return {"item": item, "items": auth_service.list_keys(role="user")}
+
+
+    @router.post("/api/auth/users/{key_id}/recharge")
+    async def recharge_user_key(
+            key_id: str,
+            body: UserKeyRechargeRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        amount = round(float(body.amount), 3)
+        if amount == 0:
+            raise HTTPException(status_code=400, detail={"error": "amount must not be 0"})
+        try:
+            item = auth_service.adjust_balance(key_id, amount, role="user")
+        except InsufficientBalanceError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "余额不能扣成负数", "required": exc.required, "balance": exc.balance},
+            ) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "user key not found"})
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "用户余额调整",
+            {
+                "key_id": item.get("id"),
+                "key_name": item.get("name"),
+                "amount": amount,
+                "balance_after": item.get("balance"),
+                "note": body.note or "",
+            },
+        )
         return {"item": item, "items": auth_service.list_keys(role="user")}
 
     @router.delete("/api/auth/users/{key_id}")

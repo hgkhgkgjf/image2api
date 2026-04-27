@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, Sparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type RefObject } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import type { ImageConversationMode } from "@/store/image-conversations";
+import { IMAGE_PROMPT_CATEGORY_AUTO, IMAGE_PROMPT_CATEGORY_GROUPS } from "@/constants/image-prompt-categories";
 import { cn } from "@/lib/utils";
 
 type ImageComposerProps = {
@@ -14,6 +15,9 @@ type ImageComposerProps = {
   prompt: string;
   imageCount: string;
   imageSize: string;
+  promptCategory: string;
+  autoStandardizePrompt: boolean;
+  isStandardizingPrompt: boolean;
   availableQuota: string;
   activeTaskCount: number;
   referenceImages: Array<{ name: string; dataUrl: string }>;
@@ -23,6 +27,9 @@ type ImageComposerProps = {
   onPromptChange: (value: string) => void;
   onImageCountChange: (value: string) => void;
   onImageSizeChange: (value: string) => void;
+  onPromptCategoryChange: (value: string) => void;
+  onAutoStandardizePromptChange: (value: boolean) => void;
+  onStandardizePrompt: () => void | Promise<void>;
   onSubmit: () => void | Promise<void>;
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
@@ -34,6 +41,9 @@ export function ImageComposer({
   prompt,
   imageCount,
   imageSize,
+  promptCategory,
+  autoStandardizePrompt,
+  isStandardizingPrompt,
   availableQuota,
   activeTaskCount,
   referenceImages,
@@ -43,6 +53,9 @@ export function ImageComposer({
   onPromptChange,
   onImageCountChange,
   onImageSizeChange,
+  onPromptCategoryChange,
+  onAutoStandardizePromptChange,
+  onStandardizePrompt,
   onSubmit,
   onPickReferenceImage,
   onReferenceImageChange,
@@ -141,6 +154,62 @@ export function ImageComposer({
             ))}
           </div>
         ) : null}
+
+
+        <div className="mb-3 flex flex-wrap items-center gap-2 px-1 text-xs text-stone-600">
+          <label className="flex items-center gap-2 rounded-full border border-stone-200 bg-white/85 px-3 py-2 shadow-sm">
+            <span className="shrink-0 font-medium text-stone-700">灵感分类</span>
+            <select
+              value={promptCategory || IMAGE_PROMPT_CATEGORY_AUTO}
+              disabled={isStandardizingPrompt}
+              onChange={(event) => onPromptCategoryChange(event.target.value)}
+              className="max-w-[210px] bg-transparent text-xs font-semibold text-stone-800 outline-none sm:max-w-[280px]"
+            >
+              <option value={IMAGE_PROMPT_CATEGORY_AUTO}>自动识别分类</option>
+              {IMAGE_PROMPT_CATEGORY_GROUPS.map((group) => (
+                <optgroup key={group.slug} label={group.group}>
+                  {group.items.map((category) => (
+                    <option key={category.slug} value={category.slug}>
+                      {category.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+
+          <button
+            type="button"
+            onClick={() => onAutoStandardizePromptChange(!autoStandardizePrompt)}
+            disabled={isStandardizingPrompt}
+            className={cn(
+              "inline-flex h-9 items-center gap-1.5 rounded-full border px-3 font-medium transition disabled:cursor-not-allowed disabled:opacity-60",
+              autoStandardizePrompt
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                : "border-stone-200 bg-white/85 text-stone-600 hover:bg-white",
+            )}
+            title="提交时自动调用 GPT5.4 转成标准绘图提示词"
+          >
+            <Sparkles className="size-3.5" />
+            {autoStandardizePrompt ? "自动优化开" : "自动优化关"}
+          </button>
+
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!prompt.trim() || isStandardizingPrompt}
+            onClick={() => void onStandardizePrompt()}
+            className="h-9 rounded-full border-stone-200 bg-white/85 px-3 text-xs font-medium text-stone-700 shadow-sm hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+            title="立即用 GPT5.4 把当前输入改写为标准提示词"
+          >
+            {isStandardizingPrompt ? <LoaderCircle className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+            GPT5.4 优化提示词
+          </Button>
+
+          <span className="hidden text-[11px] text-stone-400 sm:inline">
+            分类来自 awesome-gpt-image-2
+          </span>
+        </div>
 
         <div className="rounded-[32px] border border-stone-200 bg-white">
           <div
@@ -261,7 +330,7 @@ export function ImageComposer({
                 <button
                   type="button"
                   onClick={() => void onSubmit()}
-                  disabled={!prompt.trim() || (mode === "edit" && referenceImages.length === 0)}
+                  disabled={isStandardizingPrompt || !prompt.trim() || (mode === "edit" && referenceImages.length === 0)}
                   className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-stone-950 text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300 sm:size-11"
                   aria-label={mode === "edit" ? "编辑图片" : "生成图片"}
                 >

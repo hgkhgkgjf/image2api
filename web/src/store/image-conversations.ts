@@ -190,6 +190,18 @@ async function readStoredImageConversations(): Promise<ImageConversation[]> {
   return items.map(normalizeConversation);
 }
 
+
+export function normalizeImageConversations(items: unknown[]): ImageConversation[] {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return sortImageConversations(
+    items
+      .filter((item): item is ImageConversation & Record<string, unknown> => !!item && typeof item === "object")
+      .map((item) => normalizeConversation(item)),
+  );
+}
+
 export async function listImageConversations(): Promise<ImageConversation[]> {
   return sortImageConversations(await readStoredImageConversations());
 }

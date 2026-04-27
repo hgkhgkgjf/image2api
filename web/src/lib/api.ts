@@ -81,6 +81,11 @@ export type LoginResponse = {
   role: AuthRole;
   subject_id: string;
   name: string;
+  key?: string;
+  username?: string | null;
+  balance?: number | null;
+  total_used?: number | null;
+  total_recharged?: number | null;
 };
 
 export type UserKey = {
@@ -90,6 +95,23 @@ export type UserKey = {
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
+  username?: string;
+  has_password?: boolean;
+  source?: string;
+  balance: number;
+  total_used: number;
+  total_recharged: number;
+};
+
+export type CurrentUser = {
+  id: string;
+  name: string;
+  role: AuthRole;
+  enabled?: boolean;
+  username?: string | null;
+  balance?: number | null;
+  total_used?: number | null;
+  total_recharged?: number | null;
 };
 
 export async function login(authKey: string) {
@@ -101,6 +123,43 @@ export async function login(authKey: string) {
       Authorization: `Bearer ${normalizedAuthKey}`,
     },
     redirectOnUnauthorized: false,
+  });
+}
+
+export async function loginWithPassword(username: string, password: string) {
+  return httpRequest<LoginResponse>("/auth/password-login", {
+    method: "POST",
+    body: { username, password },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function registerUser(params: { username: string; password: string; name?: string }) {
+  return httpRequest<LoginResponse>("/auth/register", {
+    method: "POST",
+    body: params,
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function fetchCurrentUser() {
+  return httpRequest<{ item: CurrentUser }>("/api/me");
+}
+
+export async function fetchImageConversations() {
+  return httpRequest<{ items: unknown[] }>("/api/image-conversations");
+}
+
+export async function saveServerImageConversations(items: unknown[]) {
+  return httpRequest<{ items: unknown[] }>("/api/image-conversations", {
+    method: "POST",
+    body: { items },
+  });
+}
+
+export async function clearServerImageConversations() {
+  return httpRequest<{ items: unknown[] }>("/api/image-conversations", {
+    method: "DELETE",
   });
 }
 
@@ -142,6 +201,33 @@ export async function updateAccount(
     body: {
       access_token: accessToken,
       ...updates,
+    },
+  });
+}
+
+
+export type StandardizeImagePromptResponse = {
+  prompt: string;
+  original_prompt: string;
+  category: string;
+  category_label: string;
+  mode: "generate" | "edit";
+  size: string;
+  model: string;
+  source: string;
+};
+
+export async function standardizeImagePrompt(
+  input: string,
+  options: { category?: string; mode?: "generate" | "edit"; size?: string } = {},
+) {
+  return httpRequest<StandardizeImagePromptResponse>("/api/image-prompts/standardize", {
+    method: "POST",
+    body: {
+      input,
+      category: options.category || "auto",
+      mode: options.mode || "generate",
+      ...(options.size ? { size: options.size } : {}),
     },
   });
 }
@@ -219,10 +305,10 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string) {
+export async function createUserKey(name: string, initialBalance = 0) {
   return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name },
+    body: { name, initial_balance: initialBalance },
   });
 }
 
@@ -238,6 +324,14 @@ export async function deleteUserKey(keyId: string) {
     method: "DELETE",
   });
 }
+
+export async function rechargeUserKey(keyId: string, amount: number, note = "") {
+  return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}/recharge`, {
+    method: "POST",
+    body: { amount, note },
+  });
+}
+
 
 // ── CPA (CLIProxyAPI) ──────────────────────────────────────────────
 

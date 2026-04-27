@@ -15,13 +15,23 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { editImage, fetchAccounts, generateImage, type Account } from "@/lib/api";
+import {
+  editImage,
+  fetchAccounts,
+  fetchCurrentUser,
+  fetchImageConversations,
+  generateImage,
+  saveServerImageConversations,
+  standardizeImagePrompt,
+  type Account,
+} from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
   deleteImageConversation,
   getImageConversationStats,
   listImageConversations,
+  normalizeImageConversations,
   saveImageConversations,
   type ImageConversation,
   type ImageConversationMode,
@@ -33,6 +43,8 @@ import {
 
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
+const IMAGE_PROMPT_CATEGORY_STORAGE_KEY = "chatgpt2api:image_prompt_category";
+const IMAGE_AUTO_STANDARDIZE_STORAGE_KEY = "chatgpt2api:image_auto_standardize";
 const activeConversationQueueIds = new Set<string>();
 
 function buildConversationTitle(prompt: string) {
@@ -59,6 +71,14 @@ function formatConversationTime(value: string) {
 function formatAvailableQuota(accounts: Account[]) {
   const availableAccounts = accounts.filter((account) => account.status !== "禁用");
   return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+}
+
+function formatPoint(value: unknown) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "--";
+  }
+  return `${amount.toFixed(3).replace(/\.?0+$/, "")} 点`;
 }
 
 function createId() {
@@ -109,6 +129,20 @@ function pickFallbackConversationId(conversations: ImageConversation[]) {
 
 function sortImageConversations(conversations: ImageConversation[]) {
   return [...conversations].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+
+function mergeImageConversationLists(...groups: ImageConversation[][]) {
+  const byId = new Map<string, ImageConversation>();
+  for (const group of groups) {
+    for (const conversation of group) {
+      const previous = byId.get(conversation.id);
+      if (!previous || conversation.updatedAt.localeCompare(previous.updatedAt) >= 0) {
+        byId.set(conversation.id, conversation);
+      }
+    }
+  }
+  return sortImageConversations(Array.from(byId.values()));
 }
 
 async function recoverConversationHistory(items: ImageConversation[]) {
@@ -182,6 +216,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [imageCount, setImageCount] = useState("1");
   const [imageMode, setImageMode] = useState<ImageConversationMode>("generate");
   const [imageSize, setImageSize] = useState("");
+  const [imagePromptCategory, setImagePromptCategory] = useState("auto");
+  const [autoStandardizePrompt, setAutoStandardizePrompt] = useState(true);
+  const [isStandardizingPrompt, setIsStandardizingPrompt] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
   const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
@@ -217,16 +254,32 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     const loadHistory = async () => {
       try {
         const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
+        const storedPromptCategory =
+          typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_PROMPT_CATEGORY_STORAGE_KEY) : null;
+        const storedAutoStandardize =
+          typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_AUTO_STANDARDIZE_STORAGE_KEY) : null;
         setImageSize(storedSize || "");
+        setImagePromptCategory(storedPromptCategory || "auto");
+        setAutoStandardizePrompt(storedAutoStandardize === null ? true : storedAutoStandardize === "1");
 
-        const items = await listImageConversations();
-        const normalizedItems = await recoverConversationHistory(items);
+        const localItems = await listImageConversations();
+        let serverItems: ImageConversation[] = [];
+        try {
+          const serverData = await fetchImageConversations();
+          serverItems = normalizeImageConversations(serverData.items || []);
+        } catch {
+          serverItems = [];
+        }
+        const mergedItems = mergeImageConversationLists(localItems, serverItems);
+        const normalizedItems = await recoverConversationHistory(mergedItems);
         if (cancelled) {
           return;
         }
 
         conversationsRef.current = normalizedItems;
         setConversations(normalizedItems);
+        await saveImageConversations(normalizedItems);
+        void saveServerImageConversations(normalizedItems);
         const storedConversationId =
           typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) : null;
         const nextSelectedConversationId =
@@ -251,11 +304,12 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   }, []);
 
   const loadQuota = useCallback(async () => {
-    if (!isAdmin) {
-      setAvailableQuota("--");
-      return;
-    }
     try {
+      if (!isAdmin) {
+        const data = await fetchCurrentUser();
+        setAvailableQuota(formatPoint(data.item?.balance));
+        return;
+      }
       const data = await fetchAccounts();
       setAvailableQuota(formatAvailableQuota(data.items));
     } catch {
@@ -315,6 +369,21 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     window.localStorage.removeItem(IMAGE_SIZE_STORAGE_KEY);
   }, [imageSize]);
 
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(IMAGE_PROMPT_CATEGORY_STORAGE_KEY, imagePromptCategory || "auto");
+  }, [imagePromptCategory]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(IMAGE_AUTO_STANDARDIZE_STORAGE_KEY, autoStandardizePrompt ? "1" : "0");
+  }, [autoStandardizePrompt]);
+
   useEffect(() => {
     if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
       setSelectedConversationId(pickFallbackConversationId(conversations));
@@ -329,6 +398,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     conversationsRef.current = nextConversations;
     setConversations(nextConversations);
     await saveImageConversations(nextConversations);
+    await saveServerImageConversations(nextConversations).catch(() => undefined);
   };
 
   const updateConversation = useCallback(
@@ -347,6 +417,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       setConversations(nextConversations);
       if (options.persist !== false) {
         await saveImageConversations(nextConversations);
+        await saveServerImageConversations(nextConversations).catch(() => undefined);
       }
     },
     [],
@@ -384,6 +455,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
     try {
       await deleteImageConversation(id);
+      await saveServerImageConversations(nextConversations).catch(() => undefined);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除会话失败";
       toast.error(message);
@@ -396,6 +468,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const handleClearHistory = async () => {
     try {
       await clearImageConversations();
+      await saveServerImageConversations([]).catch(() => undefined);
       conversationsRef.current = [];
       setConversations([]);
       setSelectedConversationId(null);
@@ -488,6 +561,48 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     setLightboxIndex(Math.max(0, Math.min(index, images.length - 1)));
     setLightboxOpen(true);
   }, []);
+
+  const standardizePromptText = useCallback(
+    async (prompt: string) => {
+      const value = prompt.trim();
+      if (!value) {
+        throw new Error("请输入提示词");
+      }
+      setIsStandardizingPrompt(true);
+      try {
+        const data = await standardizeImagePrompt(value, {
+          category: imagePromptCategory || "auto",
+          mode: imageMode,
+          size: imageSize,
+        });
+        const nextPrompt = data.prompt.trim();
+        if (!nextPrompt) {
+          throw new Error("GPT5.4 未返回标准提示词");
+        }
+        return nextPrompt;
+      } finally {
+        setIsStandardizingPrompt(false);
+        void loadQuota();
+      }
+    },
+    [imageMode, imagePromptCategory, imageSize, loadQuota],
+  );
+
+  const handleStandardizePrompt = useCallback(async () => {
+    const prompt = imagePrompt.trim();
+    if (!prompt) {
+      toast.error("请输入提示词");
+      return;
+    }
+    try {
+      const nextPrompt = await standardizePromptText(prompt);
+      setImagePrompt(nextPrompt);
+      toast.success("已用 GPT5.4 转换为标准提示词");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "提示词标准化失败";
+      toast.error(message);
+    }
+  }, [imagePrompt, standardizePromptText]);
 
   /* eslint-disable react-hooks/preserve-manual-memoization */
   const runConversationQueue = useCallback(
@@ -706,9 +821,26 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       return;
     }
 
+    if (isStandardizingPrompt) {
+      toast.error("提示词正在优化中，请稍后");
+      return;
+    }
+
     if (imageMode === "edit" && referenceImageFiles.length === 0) {
       toast.error("请先上传参考图");
       return;
+    }
+
+    let finalPrompt = prompt;
+    if (autoStandardizePrompt) {
+      try {
+        finalPrompt = await standardizePromptText(prompt);
+        toast.success("已用 GPT5.4 转换为标准提示词");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "提示词标准化失败";
+        toast.error(message);
+        return;
+      }
     }
 
     const targetConversation = selectedConversationId
@@ -719,7 +851,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     const turnId = createId();
     const draftTurn: ImageTurn = {
       id: turnId,
-      prompt,
+      prompt: finalPrompt,
       model: "auto",
       mode: imageMode,
       referenceImages: imageMode === "edit" ? referenceImages : [],
@@ -853,6 +985,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             prompt={imagePrompt}
             imageCount={imageCount}
             imageSize={imageSize}
+            promptCategory={imagePromptCategory}
+            autoStandardizePrompt={autoStandardizePrompt}
+            isStandardizingPrompt={isStandardizingPrompt}
             availableQuota={availableQuota}
             activeTaskCount={activeTaskCount}
             referenceImages={referenceImages}
@@ -862,6 +997,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             onPromptChange={setImagePrompt}
             onImageCountChange={setImageCount}
             onImageSizeChange={setImageSize}
+            onPromptCategoryChange={setImagePromptCategory}
+            onAutoStandardizePromptChange={setAutoStandardizePrompt}
+            onStandardizePrompt={handleStandardizePrompt}
             onSubmit={handleSubmit}
             onPickReferenceImage={() => fileInputRef.current?.click()}
             onReferenceImageChange={handleReferenceImageChange}

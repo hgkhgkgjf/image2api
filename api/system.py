@@ -6,8 +6,9 @@ from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.config import config
+from services.auth_service import auth_service
+from services.log_service import LOG_TYPE_ACCOUNT, log_service
 from services.image_service import list_images
-from services.log_service import log_service
 from services.proxy_service import test_proxy
 
 
@@ -19,19 +20,70 @@ class ProxyTestRequest(BaseModel):
     url: str = ""
 
 
+class PasswordLoginRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+class RegisterRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+    name: str = ""
+
+
+def _login_payload(identity: dict[str, object], app_version: str, key: str | None = None) -> dict[str, object]:
+    payload = {
+        "ok": True,
+        "version": app_version,
+        "role": identity.get("role"),
+        "subject_id": identity.get("id"),
+        "name": identity.get("name"),
+        "balance": identity.get("balance"),
+        "total_used": identity.get("total_used"),
+        "total_recharged": identity.get("total_recharged"),
+        "username": identity.get("username"),
+    }
+    if key:
+        payload["key"] = key
+    return payload
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        return {
-            "ok": True,
-            "version": app_version,
-            "role": identity.get("role"),
-            "subject_id": identity.get("id"),
-            "name": identity.get("name"),
-        }
+        return _login_payload(identity, app_version)
+
+    @router.post("/auth/password-login")
+    async def password_login(body: PasswordLoginRequest):
+        result = auth_service.login_with_password(username=body.username, password=body.password)
+        if result is None:
+            raise HTTPException(status_code=401, detail={"error": "用户名或密码错误"})
+        identity, session_token = result
+        return _login_payload(identity, app_version, session_token)
+
+    @router.post("/auth/register")
+    async def register(body: RegisterRequest):
+        try:
+            identity, session_token = auth_service.create_registered_user(
+                username=body.username,
+                password=body.password,
+                name=body.name,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "用户自助注册",
+            {"key_id": identity.get("id"), "key_name": identity.get("name"), "username": identity.get("username")},
+        )
+        return _login_payload(identity, app_version, session_token)
+
+    @router.get("/api/me")
+    async def get_me(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return {"item": identity}
 
     @router.get("/version")
     async def get_version():

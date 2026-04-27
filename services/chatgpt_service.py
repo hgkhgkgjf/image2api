@@ -14,7 +14,8 @@ from services.account_service import AccountService
 from services.anthropic_protocol import preprocess_payload
 from services.config import config
 from services.log_service import LOG_TYPE_ACCOUNT, log_service
-from services.openai_backend_api import CODEX_IMAGE_MODEL, OpenAIBackendAPI
+from services.image_prompt_templates import build_image_prompt_standardizer_request, get_image_prompt_category
+from services.openai_backend_api import CODEX_IMAGE_MODEL, CODEX_RESPONSE_MODEL, OpenAIBackendAPI
 from utils.helper import (
     IMAGE_MODELS,
     anonymize_token,
@@ -28,6 +29,50 @@ from utils.helper import (
 )
 from utils.helper import is_image_chat_request
 from utils.log import logger
+
+
+def _extract_response_output_text(payload: object) -> str:
+    """Best-effort text extraction from ChatGPT/Codex Responses payloads."""
+    done_texts: list[str] = []
+    item_texts: list[str] = []
+    delta_parts: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            value_type = str(value.get("type") or "")
+            if value_type == "response.output_text.done" and isinstance(value.get("text"), str):
+                done_texts.append(value["text"])
+                return
+            if "output_text.delta" in value_type and isinstance(value.get("delta"), str):
+                delta_parts.append(value["delta"])
+                return
+            if value_type in {"output_text", "text"} and isinstance(value.get("text"), str):
+                item_texts.append(value["text"])
+                return
+            if isinstance(value.get("content"), str) and value_type in {"message", "output"}:
+                item_texts.append(value["content"])
+            for key in ("output", "content", "message", "messages", "data", "response"):
+                if key in value:
+                    walk(value[key])
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    candidates = done_texts or item_texts
+    if candidates:
+        return "\n".join(part.strip() for part in candidates if part and part.strip()).strip()
+    return "".join(delta_parts).strip()
+
+
+def _strip_markdown_fence(text: str) -> str:
+    value = str(text or "").strip()
+    if not value.startswith("```"):
+        return value
+    value = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", value)
+    value = re.sub(r"\s*```$", "", value)
+    return value.strip()
 
 
 class ImageGenerationError(Exception):
@@ -95,6 +140,52 @@ class ChatGPTService:
         except Exception:
             pass
         return ""
+
+    def standardize_image_prompt(
+            self,
+            prompt: str,
+            category_slug: str | None = None,
+            mode: str = "generate",
+            size: str | None = None,
+    ) -> dict[str, object]:
+        raw_prompt = str(prompt or "").strip()
+        if not raw_prompt:
+            raise ValueError("prompt is required")
+        normalized_mode = "edit" if str(mode or "").strip() == "edit" else "generate"
+        normalized_category = str(category_slug or "auto").strip() or "auto"
+        category = get_image_prompt_category(normalized_category)
+        if normalized_category != "auto" and category is None:
+            raise ValueError(f"unknown image prompt category: {normalized_category}")
+        access_token = self._get_text_access_token()
+        if not access_token:
+            raise RuntimeError("no access token available for GPT5.4 prompt standardization")
+
+        instructions, input_text = build_image_prompt_standardizer_request(
+            raw_prompt,
+            normalized_category,
+            normalized_mode,
+            size,
+        )
+        result = list(self._new_backend(access_token).responses(
+            input=input_text,
+            model=CODEX_RESPONSE_MODEL,
+            instructions=instructions,
+            stream=True,
+            store=False,
+        ))
+        output_text = _strip_markdown_fence(_extract_response_output_text(result))
+        if not output_text:
+            raise RuntimeError("GPT5.4 did not return a standardized prompt")
+        return {
+            "prompt": output_text,
+            "original_prompt": raw_prompt,
+            "category": normalized_category,
+            "category_label": category["label"] if category else "自动识别",
+            "mode": normalized_mode,
+            "size": size or "",
+            "model": CODEX_RESPONSE_MODEL,
+            "source": "YouMind-OpenLab/awesome-gpt-image-2",
+        }
 
     @staticmethod
     def _encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:

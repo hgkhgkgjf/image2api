@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { Ban, CheckCircle2, Coins, Copy, KeyRound, LoaderCircle, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey } from "@/lib/api";
+import { createUserKey, deleteUserKey, fetchUserKeys, rechargeUserKey, updateUserKey, type UserKey } from "@/lib/api";
 
 function formatDateTime(value?: string | null) {
   if (!value) {
@@ -35,16 +35,29 @@ function formatDateTime(value?: string | null) {
   }).format(date);
 }
 
+function formatPoints(value: unknown) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "0";
+  }
+  return amount.toFixed(3).replace(/\.?0+$/, "");
+}
+
 export function UserKeysCard() {
   const didLoadRef = useRef(false);
   const [items, setItems] = useState<UserKey[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [name, setName] = useState("");
+  const [initialBalance, setInitialBalance] = useState("0");
   const [isCreating, setIsCreating] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [revealedKey, setRevealedKey] = useState("");
   const [deletingItem, setDeletingItem] = useState<UserKey | null>(null);
+  const [rechargeItem, setRechargeItem] = useState<UserKey | null>(null);
+  const [rechargeAmount, setRechargeAmount] = useState("100");
+  const [rechargeNote, setRechargeNote] = useState("");
+  const [isRecharging, setIsRecharging] = useState(false);
 
   const load = async () => {
     setIsLoading(true);
@@ -69,10 +82,12 @@ export function UserKeysCard() {
   const handleCreate = async () => {
     setIsCreating(true);
     try {
-      const data = await createUserKey(name.trim());
+      const amount = Math.max(0, Number(initialBalance) || 0);
+      const data = await createUserKey(name.trim(), amount);
       setItems(data.items);
       setRevealedKey(data.key);
       setName("");
+      setInitialBalance("0");
       setIsDialogOpen(false);
       toast.success("用户密钥已创建");
     } catch (error) {
@@ -125,6 +140,32 @@ export function UserKeysCard() {
     }
   };
 
+  const handleRecharge = async () => {
+    if (!rechargeItem) {
+      return;
+    }
+    const amount = Number(rechargeAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast.error("请输入大于 0 的充值点数");
+      return;
+    }
+    setIsRecharging(true);
+    setItemPending(rechargeItem.id, true);
+    try {
+      const data = await rechargeUserKey(rechargeItem.id, amount, rechargeNote.trim());
+      setItems(data.items);
+      setRechargeItem(null);
+      setRechargeAmount("100");
+      setRechargeNote("");
+      toast.success(`已充值 ${formatPoints(amount)} 点`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "充值失败");
+    } finally {
+      setIsRecharging(false);
+      setItemPending(rechargeItem.id, false);
+    }
+  };
+
   const handleCopy = async (value: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -145,7 +186,7 @@ export function UserKeysCard() {
               </div>
               <div>
                 <h2 className="text-lg font-semibold tracking-tight">用户密钥管理</h2>
-                <p className="text-sm text-stone-500">为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。</p>
+                <p className="text-sm text-stone-500">管理自助注册用户和专用密钥；可直接给用户充值，普通用户只能进入画图页。</p>
               </div>
             </div>
             <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => setIsDialogOpen(true)}>
@@ -192,14 +233,41 @@ export function UserKeysCard() {
                         <Badge variant={item.enabled ? "success" : "secondary"} className="rounded-md">
                           {item.enabled ? "已启用" : "已禁用"}
                         </Badge>
+                        <Badge variant={Number(item.balance) > 0 ? "info" : "warning"} className="rounded-md">
+                          余额 {formatPoints(item.balance)} 点
+                        </Badge>
+                        <Badge variant="secondary" className="rounded-md">
+                          已消费 {formatPoints(item.total_used)} 点
+                        </Badge>
+                        {item.username ? (
+                          <Badge variant="violet" className="rounded-md">
+                            注册用户 @{item.username}
+                          </Badge>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
                         <span>创建时间 {formatDateTime(item.created_at)}</span>
                         <span>最近使用 {formatDateTime(item.last_used_at)}</span>
+                        <span>累计充值 {formatPoints(item.total_recharged)} 点</span>
+                        <span>{item.source === "registered" ? "来源 自助注册" : "来源 手动密钥"}</span>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-9 rounded-xl border-sky-200 bg-white px-4 text-sky-700 hover:bg-sky-50 hover:text-sky-800"
+                        onClick={() => {
+                          setRechargeItem(item);
+                          setRechargeAmount("100");
+                          setRechargeNote("");
+                        }}
+                        disabled={isPending}
+                      >
+                        <Coins className="size-4" />
+                        充值
+                      </Button>
                       <Button
                         type="button"
                         variant="outline"
@@ -243,14 +311,29 @@ export function UserKeysCard() {
               可选填写一个备注名称，方便区分不同使用者；创建后会生成一条只能查看一次的原始密钥。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">名称（可选）</label>
-            <Input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="例如：设计同学 A、运营临时账号"
-              className="h-11 rounded-xl border-stone-200 bg-white"
-            />
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">名称（可选）</label>
+              <Input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="例如：设计同学 A、运营临时账号"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">初始余额（点）</label>
+              <Input
+                type="number"
+                min="0"
+                step="0.1"
+                value={initialBalance}
+                onChange={(event) => setInitialBalance(event.target.value)}
+                placeholder="例如：100"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+              <p className="text-xs text-stone-500">计费规则：提示词优化 0.1 点，文生图 1 点/张，图生图 2 点/张。</p>
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -301,6 +384,59 @@ export function UserKeysCard() {
             >
               {deletingItem && pendingIds.has(deletingItem.id) ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
               删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(rechargeItem)} onOpenChange={(open) => (!open ? setRechargeItem(null) : null)}>
+        <DialogContent className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>给用户充值</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              当前用户「{rechargeItem?.name}」余额 {formatPoints(rechargeItem?.balance)} 点。充值后会立即生效，余额不足时用户将无法生成图片。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">充值点数</label>
+              <Input
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={rechargeAmount}
+                onChange={(event) => setRechargeAmount(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">备注（可选）</label>
+              <Input
+                value={rechargeNote}
+                onChange={(event) => setRechargeNote(event.target.value)}
+                placeholder="例如：微信收款、月度套餐"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              onClick={() => setRechargeItem(null)}
+              disabled={isRecharging}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              onClick={() => void handleRecharge()}
+              disabled={isRecharging}
+            >
+              {isRecharging ? <LoaderCircle className="size-4 animate-spin" /> : <Coins className="size-4" />}
+              确认充值
             </Button>
           </DialogFooter>
         </DialogContent>
