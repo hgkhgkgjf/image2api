@@ -179,6 +179,15 @@ def _log_call(
                 "balance_after": billing.get("balance_after"),
             }
         )
+    if isinstance(result, dict):
+        for key in ("error", "message", "code"):
+            value = result.get(key)
+            if isinstance(value, (str, int, float, bool)) and value != "":
+                detail[key] = value
+            elif key == "error" and isinstance(value, dict):
+                nested_message = value.get("message") or value.get("error") or value.get("code")
+                if nested_message:
+                    detail["error"] = str(nested_message)
     urls = _collect_urls(result)
     if urls:
         detail["urls"] = list(dict.fromkeys(urls))

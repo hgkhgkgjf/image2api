@@ -838,8 +838,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         toast.success("已用 GPT5.4 转换为标准提示词");
       } catch (error) {
         const message = error instanceof Error ? error.message : "提示词标准化失败";
-        toast.error(message);
-        return;
+        toast.warning(`${message}，已使用原始提示词继续生成`);
+        finalPrompt = prompt;
       }
     }
 

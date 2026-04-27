@@ -126,20 +126,35 @@ def _extract_response_image(input_value: object) -> tuple[bytes, str] | None:
 class ChatGPTService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
+        self._text_token_index = 0
 
     @staticmethod
     def _new_backend(access_token: str = "") -> OpenAIBackendAPI:
         return OpenAIBackendAPI(access_token=access_token)
 
-    def _get_text_access_token(self) -> str:
+    def _list_text_access_tokens(self) -> list[str]:
+        """Return text-capable account tokens in rotating order.
+
+        Prompt standardization uses the Codex responses endpoint. A single account can
+        be rate-limited (429), so do not always pin to the first stored account.
+        """
+        tokens: list[str] = []
         try:
             for access_token in self.account_service.list_tokens():
                 status = str((self.account_service.get_account(access_token) or {}).get("status") or "").strip()
                 if status not in {"禁用", "异常"}:
-                    return access_token
+                    tokens.append(access_token)
         except Exception:
             pass
-        return ""
+        if not tokens:
+            return []
+        start = self._text_token_index % len(tokens)
+        self._text_token_index += 1
+        return tokens[start:] + tokens[:start]
+
+    def _get_text_access_token(self) -> str:
+        tokens = self._list_text_access_tokens()
+        return tokens[0] if tokens else ""
 
     def standardize_image_prompt(
             self,
@@ -156,8 +171,8 @@ class ChatGPTService:
         category = get_image_prompt_category(normalized_category)
         if normalized_category != "auto" and category is None:
             raise ValueError(f"unknown image prompt category: {normalized_category}")
-        access_token = self._get_text_access_token()
-        if not access_token:
+        access_tokens = self._list_text_access_tokens()
+        if not access_tokens:
             raise RuntimeError("no access token available for GPT5.4 prompt standardization")
 
         instructions, input_text = build_image_prompt_standardizer_request(
@@ -166,26 +181,40 @@ class ChatGPTService:
             normalized_mode,
             size,
         )
-        result = list(self._new_backend(access_token).responses(
-            input=input_text,
-            model=CODEX_RESPONSE_MODEL,
-            instructions=instructions,
-            stream=True,
-            store=False,
-        ))
-        output_text = _strip_markdown_fence(_extract_response_output_text(result))
-        if not output_text:
-            raise RuntimeError("GPT5.4 did not return a standardized prompt")
-        return {
-            "prompt": output_text,
-            "original_prompt": raw_prompt,
-            "category": normalized_category,
-            "category_label": category["label"] if category else "自动识别",
-            "mode": normalized_mode,
-            "size": size or "",
-            "model": CODEX_RESPONSE_MODEL,
-            "source": "YouMind-OpenLab/awesome-gpt-image-2",
-        }
+        errors: list[str] = []
+        for access_token in access_tokens:
+            token_ref = anonymize_token(access_token)
+            try:
+                result = list(self._new_backend(access_token).responses(
+                    input=input_text,
+                    model=CODEX_RESPONSE_MODEL,
+                    instructions=instructions,
+                    stream=True,
+                    store=False,
+                ))
+                output_text = _strip_markdown_fence(_extract_response_output_text(result))
+                if not output_text:
+                    raise RuntimeError("GPT5.4 did not return a standardized prompt")
+                return {
+                    "prompt": output_text,
+                    "original_prompt": raw_prompt,
+                    "category": normalized_category,
+                    "category_label": category["label"] if category else "自动识别",
+                    "mode": normalized_mode,
+                    "size": size or "",
+                    "model": CODEX_RESPONSE_MODEL,
+                    "source": "YouMind-OpenLab/awesome-gpt-image-2",
+                }
+            except Exception as exc:
+                message = str(exc)
+                errors.append(f"{token_ref}: {message}")
+                logger.warning({
+                    "event": "standardize_image_prompt_token_failed",
+                    "token": token_ref,
+                    "error": message,
+                })
+                continue
+        raise RuntimeError("GPT5.4 prompt standardization failed for all available accounts: " + " | ".join(errors[-5:]))
 
     @staticmethod
     def _encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
