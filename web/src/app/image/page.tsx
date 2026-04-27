@@ -108,16 +108,47 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
   return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
 }
 
+async function imageUrlToFile(url: string, fileName: string, mimeType?: string) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("读取参考图失败");
+  }
+  const blob = await response.blob();
+  return new File([blob], fileName, { type: mimeType || blob.type || "image/png" });
+}
+
+async function imageSourceToFile(
+  image: { dataUrl?: string; url?: string; name?: string; type?: string },
+  fileName: string,
+) {
+  const name = image.name || fileName;
+  const type = image.type || "image/png";
+  if (image.dataUrl) {
+    return dataUrlToFile(image.dataUrl, name, type);
+  }
+  if (image.url) {
+    return imageUrlToFile(image.url, name, type);
+  }
+  throw new Error("未找到可用的参考图数据");
+}
+
 function buildReferenceImageFromResult(image: StoredImage, fileName: string): StoredReferenceImage | null {
-  if (!image.b64_json) {
-    return null;
+  if (image.url) {
+    return {
+      name: fileName,
+      type: "image/png",
+      url: image.url,
+    };
+  }
+  if (image.b64_json) {
+    return {
+      name: fileName,
+      type: "image/png",
+      dataUrl: `data:image/png;base64,${image.b64_json}`,
+    };
   }
 
-  return {
-    name: fileName,
-    type: "image/png",
-    dataUrl: `data:image/png;base64,${image.b64_json}`,
-  };
+  return null;
 }
 
 function pickFallbackConversationId(conversations: ImageConversation[]) {
@@ -529,25 +560,29 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   }, []);
 
   const handleContinueEdit = useCallback(
-    (conversationId: string, image: StoredImage | StoredReferenceImage) => {
+    async (conversationId: string, image: StoredImage | StoredReferenceImage) => {
       const nextReferenceImage =
-        "dataUrl" in image
-          ? image
-          : buildReferenceImageFromResult(image, `conversation-${conversationId}-${Date.now()}.png`);
+        "id" in image || "b64_json" in image || "status" in image
+          ? buildReferenceImageFromResult(image, `conversation-${conversationId}-${Date.now()}.png`)
+          : image;
       if (!nextReferenceImage) {
+        toast.error("未找到可用于编辑的图片");
         return;
       }
 
-      setSelectedConversationId(conversationId);
-      setImageMode("edit");
-      setReferenceImages((prev) => [...prev, nextReferenceImage]);
-      setReferenceImageFiles((prev) => [
-        ...prev,
-        dataUrlToFile(nextReferenceImage.dataUrl, nextReferenceImage.name, nextReferenceImage.type),
-      ]);
-      setImagePrompt("");
-      textareaRef.current?.focus();
-      toast.success("已加入当前参考图，继续输入描述即可编辑");
+      try {
+        const nextFile = await imageSourceToFile(nextReferenceImage, nextReferenceImage.name);
+        setSelectedConversationId(conversationId);
+        setImageMode("edit");
+        setReferenceImages((prev) => [...prev, nextReferenceImage]);
+        setReferenceImageFiles((prev) => [...prev, nextFile]);
+        setImagePrompt("");
+        textareaRef.current?.focus();
+        toast.success("已加入当前参考图，继续输入描述即可编辑");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "读取参考图失败";
+        toast.error(message);
+      }
     },
     [],
   );
@@ -636,8 +671,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       });
 
       try {
-        const referenceFiles = queuedTurn.referenceImages.map((image, index) =>
-          dataUrlToFile(image.dataUrl, image.name || `${queuedTurn.id}-${index + 1}.png`, image.type),
+        const referenceFiles = await Promise.all(
+          queuedTurn.referenceImages.map((image, index) =>
+            imageSourceToFile(image, `${queuedTurn.id}-${index + 1}.png`),
+          ),
         );
         const pendingImages = queuedTurn.images.filter((image) => image.status === "loading");
 
@@ -674,14 +711,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 ? await editImage(referenceFiles, queuedTurn.prompt, queuedTurn.model, queuedTurn.size)
                 : await generateImage(queuedTurn.prompt, queuedTurn.model, queuedTurn.size);
             const first = data.data?.[0];
-            if (!first?.b64_json) {
+            if (!first?.url && !first?.b64_json) {
               throw new Error("未返回图片数据");
             }
 
             const nextImage: StoredImage = {
               id: pendingImage.id,
               status: "success",
-              b64_json: first.b64_json,
+              ...(first.url ? { url: first.url } : {}),
+              ...(!first.url && first.b64_json ? { b64_json: first.b64_json } : {}),
             };
 
             await updateConversation(

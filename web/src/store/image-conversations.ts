@@ -9,13 +9,15 @@ export type ImageConversationMode = "generate" | "edit";
 export type StoredReferenceImage = {
   name: string;
   type: string;
-  dataUrl: string;
+  dataUrl?: string;
+  url?: string;
 };
 
 export type StoredImage = {
   id: string;
   status?: "loading" | "success" | "error";
   b64_json?: string;
+  url?: string;
   error?: string;
 };
 
@@ -62,7 +64,7 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
   }
   return {
     ...image,
-    status: image.b64_json ? "success" : "loading",
+    status: image.b64_json || image.url ? "success" : "loading",
   };
 }
 
@@ -70,7 +72,8 @@ function normalizeReferenceImage(image: StoredReferenceImage): StoredReferenceIm
   return {
     name: image.name || "reference.png",
     type: image.type || "image/png",
-    dataUrl: image.dataUrl,
+    ...(image.dataUrl ? { dataUrl: image.dataUrl } : {}),
+    ...(image.url ? { url: image.url } : {}),
   };
 }
 
@@ -87,7 +90,7 @@ function getLegacyReferenceImages(source: Record<string, unknown>): StoredRefere
           return false;
         }
         const candidate = image as StoredReferenceImage;
-        return typeof candidate.dataUrl === "string" && candidate.dataUrl.length > 0;
+        return (typeof candidate.dataUrl === "string" && candidate.dataUrl.length > 0) || (typeof candidate.url === "string" && candidate.url.length > 0);
       })
       .map(normalizeReferenceImage);
   }

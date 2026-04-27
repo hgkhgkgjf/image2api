@@ -20,7 +20,7 @@ type ImageComposerProps = {
   isStandardizingPrompt: boolean;
   availableQuota: string;
   activeTaskCount: number;
-  referenceImages: Array<{ name: string; dataUrl: string }>;
+  referenceImages: Array<{ name: string; dataUrl?: string; url?: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
   onModeChange: (value: ImageConversationMode) => void;
@@ -66,7 +66,7 @@ export function ImageComposer({
   const [isSizeMenuOpen, setIsSizeMenuOpen] = useState(false);
   const sizeMenuRef = useRef<HTMLDivElement>(null);
   const lightboxImages = useMemo(
-    () => referenceImages.map((image, index) => ({ id: `${image.name}-${index}`, src: image.dataUrl })),
+    () => referenceImages.map((image, index) => ({ id: `${image.name}-${index}`, src: image.url || image.dataUrl || "" })).filter((image) => image.src),
     [referenceImages],
   );
   const imageSizeOptions = [
@@ -134,7 +134,7 @@ export function ImageComposer({
                   aria-label={`预览参考图 ${image.name || index + 1}`}
                 >
                   <img
-                    src={image.dataUrl}
+                    src={image.url || image.dataUrl || ""}
                     alt={image.name || `参考图 ${index + 1}`}
                     className="h-full w-full object-cover"
                   />
